@@ -11,7 +11,7 @@ class DeepTutorEngine {
   private ai: GoogleGenAI | null = null;
 
   private isProduction() {
-    // SSR and Server-safe check
+    // SSR and Server-safe check: prevents crashes in Node.js environments
     if (typeof window === 'undefined') return true; 
     
     return window.location.hostname !== 'localhost' && 
@@ -22,10 +22,9 @@ class DeepTutorEngine {
   private getAi() {
     if (!this.ai) {
       // Robust key retrieval for local dev (Vite) and production (Netlify/Node)
-      const key =
-        typeof process !== 'undefined' && process.env.API_KEY
-          ? process.env.API_KEY
-          : (import.meta as any).env?.VITE_API_KEY;
+      const key = typeof process !== 'undefined' && process.env.API_KEY
+        ? process.env.API_KEY
+        : (import.meta as any).env?.VITE_API_KEY;
 
       if (!key) throw new Error("API_KEY_MISSING");
       this.ai = new GoogleGenAI({ apiKey: key });
@@ -55,7 +54,7 @@ class DeepTutorEngine {
   }
 
   async generate(params: any) {
-    // MANDATORY FIX: Explicit narrowing for TypeScript safety during build
+    // MANDATORY FIX: Materialize parameters to satisfy TypeScript strict mode
     const prompt: string = params.prompt ?? '';
     const history: any[] = Array.isArray(params.history) ? params.history : [];
     const maxTokens: number = typeof params.maxTokens === 'number' ? params.maxTokens : 1024;
@@ -75,7 +74,7 @@ class DeepTutorEngine {
     
     const attachment = params.attachment as FileAttachment | undefined;
     if (attachment && attachment.data && typeof attachment.data === 'string') {
-      // MANDATORY FIX: Materialize and default these values to guarantee string type
+      // MANDATORY FIX: Materialize and default these values to guarantee string type for strict tsc
       const data: string = attachment.data ?? '';
       const mime: string = attachment.mimeType ?? 'application/octet-stream';
       const name: string = attachment.name ?? 'Uploaded Document';
@@ -83,7 +82,7 @@ class DeepTutorEngine {
       if (isInitialScan && mime === 'application/pdf') {
         promptParts[0].text = `Seed Document: "${name}"\nType: Academic Archive\n\n${prompt}`;
       } else if (mime.startsWith('text/')) {
-        // Safe base64 decoding for both browser and Node
+        // Safe base64 decoding for both browser and Node (Netlify Functions)
         const decoded = typeof atob === 'function' 
           ? atob(data) 
           : Buffer.from(data, 'base64').toString('utf-8');
@@ -110,7 +109,7 @@ class DeepTutorEngine {
     // PRODUCTION PROXY LOGIC
     if (this.isProduction()) {
       try {
-        // Cast global fetch for build compatibility in Node environments
+        // Cast global fetch to any to bypass Node.js typing conflicts in production
         const response = await (globalThis.fetch as any)('/.netlify/functions/gemini-proxy', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -120,13 +119,13 @@ class DeepTutorEngine {
         const result = await response.json();
         return this.sanitizeJson(result.text);
       } catch (e) {
-        console.error("Production Proxy Error, attempting direct fallback (if key exists)...", e);
+        console.error("Production Proxy Error, attempting direct fallback...", e);
         const ai = this.getAi();
         const response = await ai.models.generateContent({ model: modelName, contents, config });
         return this.sanitizeJson(response.text);
       }
     } else {
-      // DEV MODE: Direct call
+      // DEV MODE: Direct call to Google Gemini SDK
       const ai = this.getAi();
       const response = await ai.models.generateContent({ model: modelName, contents, config });
       return this.sanitizeJson(response.text);
