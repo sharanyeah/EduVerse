@@ -1,59 +1,55 @@
 
 import { GoogleGenAI } from "@google/genai";
-import { CourseSection, Message, FileAttachment, LearningResource, PracticeQuestion, ScheduleItem } from "../types";
+import { CourseSection, Message, FileAttachment, LearningResource, PracticeQuestion, ScheduleItem, McqReview } from "../types";
 
-const DEEPTUTOR_SYSTEM_PROMPT = `You are DeepTutor, an academic document processing engine. 
-PRIORITIES: Speed, Academic rigor, Progressive generation.
-All outputs must be grounded in the provided document. 
-Use LaTeX $$ for all math formulas.`;
-
-const SUPPORTED_INLINE_MIMES = ['application/pdf', 'image/png', 'image/jpeg', 'image/webp', 'image/heic', 'image/heif'];
+const DEEPTUTOR_SYSTEM_PROMPT = `You are DeepTutor, a production-grade academic learning engine. 
+You convert documents into structured learning workspaces using STRICT RAG. 
+Retrieve ONLY from the provided context. Output strictly valid JSON. 
+Priority: Speed and structural integrity.`;
 
 class DeepTutorEngine {
   private ai: GoogleGenAI | null = null;
 
+  private isProduction() {
+    return window.location.hostname !== 'localhost' && 
+           window.location.hostname !== '127.0.0.1' &&
+           !window.location.hostname.includes('webcontainer-api.io');
+  }
+
   private getAi() {
     if (!this.ai) {
       const key = process.env.API_KEY;
-      if (!key) throw new Error("API_KEY_MISSING: No Gemini API Key found in environment.");
+      if (!key) throw new Error("API_KEY_MISSING");
       this.ai = new GoogleGenAI({ apiKey: key });
     }
     return this.ai;
   }
 
-  private isProduction() {
-    return window.location.hostname !== 'localhost' && !window.location.hostname.includes('127.0.0.1');
+  private repairJson(text: string): string {
+    let cleaned = text.replace(/```json\s*|```/g, "").trim();
+    const lastBrace = cleaned.lastIndexOf('}');
+    const lastBracket = cleaned.lastIndexOf(']');
+    const lastValidChar = Math.max(lastBrace, lastBracket);
+    if (lastValidChar !== -1) {
+      return cleaned.substring(0, lastValidChar + 1);
+    }
+    return cleaned;
   }
 
-  /**
-   * Cleans the response string from Markdown blocks
-   */
-  private cleanJson(text: string): any {
+  private sanitizeJson(text: string): any {
     try {
-      const cleaned = text.replace(/```json\n?|```/g, "").trim();
-      return JSON.parse(cleaned);
+      const repaired = this.repairJson(text);
+      return JSON.parse(repaired);
     } catch (e) {
-      console.error("JSON Parse Error. Raw Text:", text);
-      // Fallback: try to find anything that looks like a JSON array/object if parsing failed
-      const startIdx = text.indexOf('[');
-      const startObjIdx = text.indexOf('{');
-      const realStart = (startIdx !== -1 && (startObjIdx === -1 || startIdx < startObjIdx)) ? startIdx : startObjIdx;
-      if (realStart !== -1) {
-        try {
-          const substring = text.substring(realStart, text.lastIndexOf(text[realStart] === '[' ? ']' : '}') + 1);
-          return JSON.parse(substring);
-        } catch (e2) {
-          throw new Error("MODEL_RESPONSE_MALFORMED: The AI returned an invalid structure.");
-        }
-      }
-      throw new Error("MODEL_RESPONSE_MALFORMED: No valid JSON found.");
+      console.error("JSON Error:", text.substring(0, 100));
+      return null;
     }
   }
 
-  private async callDirect(params: any) {
-    const ai = this.getAi();
-    const modelName = params.modelType === 'pro' ? 'gemini-3-pro-preview' : 'gemini-3-flash-preview';
+  async generate(params: any) {
+    const modelName = params.isInitialScan ? 'gemini-flash-lite-latest' : 'gemini-3-flash-preview';
     
+    // PREPARE CONTENTS
     const contents: any[] = (params.history || []).map((m: any) => ({
       role: m.role === 'model' ? 'model' : 'user',
       parts: [{ text: m.text }]
@@ -63,20 +59,13 @@ class DeepTutorEngine {
     
     if (params.attachment?.data) {
       const mime = params.attachment.mimeType;
-      if (mime === 'text/plain' || mime === 'text/markdown' || mime === 'application/json') {
-        // Use a safer base64-to-string conversion for Unicode
-        const binaryString = atob(params.attachment.data);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-        const decoded = new TextDecoder().decode(bytes);
-        
-        promptParts[0].text = `[DOC_CONTEXT]\n${decoded}\n[/DOC_CONTEXT]\n\n${params.prompt}`;
-      } else if (SUPPORTED_INLINE_MIMES.includes(mime)) {
-        promptParts.push({
-          inlineData: { data: params.attachment.data, mimeType: mime }
-        });
+      if (params.isInitialScan && mime === 'application/pdf') {
+        promptParts[0].text = `Seed Document: "${params.attachment.name}"\nType: Academic Archive\n\n${params.prompt}`;
+      } else if (mime.startsWith('text/')) {
+        const decoded = atob(params.attachment.data);
+        promptParts[0].text = `[DOC_CONTEXT]\n${decoded.substring(0, 30000)}\n[/DOC_CONTEXT]\n\n${params.prompt}`;
       } else {
-        promptParts[0].text = `[FILE_INFO: ${params.attachment.name}]\n${params.prompt}`;
+        promptParts.push({ inlineData: { data: params.attachment.data, mimeType: mime } });
       }
     }
 
@@ -85,66 +74,37 @@ class DeepTutorEngine {
     const config: any = {
       systemInstruction: params.system || DEEPTUTOR_SYSTEM_PROMPT,
       temperature: 0.1,
-      tools: params.useSearch ? [{ googleSearch: {} }] : undefined,
+      maxOutputTokens: params.maxTokens || 4096,
+      responseMimeType: "application/json"
     };
 
-    if (params.responseType === 'json') {
-      config.responseMimeType = "application/json";
+    if (params.useSearch) {
+      config.tools = [{ googleSearch: {} }];
     }
 
-    // Add a 45s timeout to avoid infinite hangs
-    const apiCall = ai.models.generateContent({ model: modelName, contents, config });
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("GATEWAY_TIMEOUT: Gemini took too long to respond.")), 45000));
-
-    const response: any = await Promise.race([apiCall, timeout]);
-    const text = response.text || '';
-    
-    if (params.responseType === 'json') {
-      return this.cleanJson(text);
-    }
-    
-    return { text };
-  }
-
-  private async callProxy(payload: any) {
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 25000); // 25s timeout for proxy
-
-    try {
-      const response = await fetch('/.netlify/functions/gemini-proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      });
-      clearTimeout(id);
-
-      if (response.status === 404) throw new Error("PROXY_NOT_FOUND");
-      const data = await response.json();
-      if (!response.ok) throw new Error(data?.error || "Cloud Proxy Failed");
-      return data;
-    } catch (e: any) {
-      if (e.name === 'AbortError') throw new Error("GATEWAY_TIMEOUT: Serverless function timed out.");
-      throw e;
-    }
-  }
-
-  async generate(params: any) {
-    // In preview or development, DIRECT is much more stable because Netlify Functions have a 10s limit
-    if (!this.isProduction()) {
-      console.log("DeepTutor: Using Direct Gateway for stability.");
-      return await this.callDirect(params);
-    }
-
-    try {
-      console.log("DeepTutor: Attempting Proxy Gateway...");
-      return await this.callProxy(params);
-    } catch (e: any) {
-      if (e.message === "PROXY_NOT_FOUND" || e.message.includes("TIMEOUT")) {
-        console.warn("DeepTutor: Proxy issue, falling back to Direct Gateway.");
-        return await this.callDirect(params);
+    // PRODUCTION PROXY LOGIC
+    if (this.isProduction()) {
+      try {
+        const response = await fetch('/.netlify/functions/gemini-proxy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: modelName, contents, config })
+        });
+        if (!response.ok) throw new Error("PROXY_REQUEST_FAILED");
+        const result = await response.json();
+        return this.sanitizeJson(result.text);
+      } catch (e) {
+        console.error("Production Proxy Error, attempting direct fallback (if key exists)...", e);
+        // Fallback for edge cases where proxy fails but user has key injected
+        const ai = this.getAi();
+        const response = await ai.models.generateContent({ model: modelName, contents, config });
+        return this.sanitizeJson(response.text);
       }
-      throw e;
+    } else {
+      // DEV MODE: Direct call
+      const ai = this.getAi();
+      const response = await ai.models.generateContent({ model: modelName, contents, config });
+      return this.sanitizeJson(response.text);
     }
   }
 }
@@ -152,67 +112,124 @@ class DeepTutorEngine {
 const engine = new DeepTutorEngine();
 
 export const handleAIError = (error: any): string => {
-  console.error("DeepTutor Failure Stack:", error);
-  const msg = error?.message || String(error);
-  if (msg.includes("API_KEY_MISSING")) return "Configuration Missing: API_KEY is not defined.";
-  if (msg.includes("TIMEOUT")) return "The document is too complex or the network is slow. Please try a smaller file.";
-  if (msg.includes("MALFORMED")) return "Structure Protocol Error: The AI returned an unreadable response. Retrying usually fixes this.";
-  return msg || "Neural Link Interrupted.";
-};
-
-export const chatWithTutor = async (history: Message[], currentSection: CourseSection, userInput: string) => {
-  const prompt = `Interrogate Unit: ${currentSection.title}. 
-  Content: ${currentSection.content.substring(0, 1000)}.
-  JSON: { "text": "...", "isExternal": boolean, "groundingScore": number, "citations": [] }`;
-  return await engine.generate({ prompt, history, modelType: 'flash', responseType: 'json' });
+  console.error("DeepTutor Service Error:", error);
+  return "Neural sync disrupted. Adjusting cognitive parameters...";
 };
 
 export const getDocumentStructure = async (attachment: FileAttachment) => {
-  const prompt = `Analyze document "${attachment.name}". 
-  Create an 8-unit curriculum. 
-  JSON Array: [{"title": "Unit Name", "summary": "Goal", "sourceRange": "Reference"}]`;
-  return await engine.generate({ prompt, attachment, responseType: 'json', modelType: 'flash' });
+  const prompt = `Deconstruct "${attachment.name}" into exactly 6 broad study units.
+  JSON Array: [{"title": "Informative Unit Title", "summary": "Goal"}]`;
+  
+  const result = await engine.generate({ 
+    prompt, 
+    attachment, 
+    isInitialScan: true,
+    maxTokens: 800 
+  });
+  return result || [];
 };
 
-export const generateStage2Core = async (section: any, attachment: any) => {
-  const prompt = `Synthesize THEORY for: "${section.title}".
-  Return JSON: {
-    "summary": "...",
-    "content": "Deep theory in Markdown",
-    "definitions": [{"term": "...", "definition": "..."}],
-    "axioms": [{"label": "...", "expression": "LaTeX without $$"}]
+export const synthesizeUnitWorkspace = async (section: CourseSection, attachment: FileAttachment) => {
+  const prompt = `Using ONLY document context for unit "${section.title}", generate a COMPLETE workspace.
+  BE CONCISE to avoid server timeouts.
+  
+  1. "detailedSummary": Sophisticated overview (3 sentences max).
+  2. "content": Core Markdown theory (Rich formatting).
+  3. "definitions": 5 key {term, definition}.
+  4. "lexicon": 5 domain words {word, meaning}.
+  5. "axioms": 2 logical principles {label, expression} in LaTeX $$.
+  6. "mindmap": Mermaid mindmap syntax.
+  7. "flashcards": EXACTLY 5 {question, answer}.
+  8. "questions": EXACTLY 5 MCQs {question, options, correctIndex, explanation}.
+  9. "difficulty": "Beginner" | "Intermediate" | "Advanced".
+  10. "resources": EXACTLY 5 authoritative search links {title, url, reason, platform, type}.
+  
+  Schema:
+  {
+    "detailedSummary": string,
+    "content": string,
+    "definitions": [],
+    "lexicon": [],
+    "axioms": [],
+    "mindmap": string,
+    "flashcards": [],
+    "questions": [],
+    "difficulty": string,
+    "resources": []
   }`;
-  return await engine.generate({ prompt, attachment, responseType: 'json', modelType: 'flash' });
+
+  const data = await engine.generate({ 
+    prompt, 
+    attachment, 
+    useSearch: true,
+    maxTokens: 4000 
+  });
+
+  if (!data) throw new Error("Synthesis malformed");
+
+  return {
+    detailedSummary: data.detailedSummary || '',
+    content: data.content || '',
+    keyTerms: data.definitions || [],
+    lexicon: data.lexicon || [],
+    formulas: data.axioms || [],
+    mindmap: data.mindmap || '',
+    flashcards: (data.flashcards || []).slice(0, 5).map((f: any) => ({
+      id: crypto.randomUUID(),
+      ...f,
+      masteryStatus: 'learning',
+      failureCount: 0,
+      difficulty: 'medium'
+    })),
+    practiceQuestions: (data.questions || []).slice(0, 5).map((q: any) => ({
+      id: crypto.randomUUID(),
+      ...q,
+      hasBeenAnswered: false,
+      difficultyLevel: 3
+    })),
+    difficultyLevel: data.difficulty || 'Intermediate',
+    resources: data.resources || [],
+    isSynthesized: true
+  };
 };
 
-export const generateStage3Logic = async (section: any, attachment: any) => {
-  const prompt = `Logic Map for: "${section.title}". 
-  JSON: {"mindmap": "mermaid mindmap syntax starting with 'mindmap'"}`;
-  return await engine.generate({ prompt, attachment, responseType: 'json', modelType: 'flash' });
-};
-
-export const generateStage4Recall = async (section: any, attachment: any) => {
-  const prompt = `Recall nodes for: "${section.title}".
-  JSON: {
-    "flashcards": [{"question": "...", "answer": "..."}],
-    "questions": [{"question": "...", "options": ["...", "..."], "correctIndex": 0, "explanation": "..."}]
+export const evaluateMcqResponse = async (question: PracticeQuestion, selectedIndex: number, section: CourseSection, attachment: FileAttachment): Promise<McqReview> => {
+  const prompt = `DIAGNOSTIC EXAM REVIEW for: ${section.title}.
+  Analyze why user picked ${question.options[selectedIndex]} vs correct ${question.options[question.correctIndex]}.
+  
+  JSON:
+  {
+    "isCorrect": boolean,
+    "verdict": "Correct" | "Incorrect",
+    "whyUserChoiceIsCorrectOrWrong": string,
+    "correctAnswerExplanation": string,
+    "misconceptionDetected": string,
+    "conceptsToReview": string[],
+    "examTip": string,
+    "addToReviewQueue": boolean
   }`;
-  return await engine.generate({ prompt, attachment, responseType: 'json', modelType: 'flash' });
+
+  const result = await engine.generate({ prompt, attachment, maxTokens: 1200 });
+  return result || {
+    isCorrect: selectedIndex === question.correctIndex,
+    verdict: selectedIndex === question.correctIndex ? "Correct" : "Incorrect",
+    whyUserChoiceIsCorrectOrWrong: "Result based on archive grounding.",
+    correctAnswerExplanation: question.explanation,
+    misconceptionDetected: "None detected.",
+    conceptsToReview: [],
+    examTip: "Refer back to theory segment.",
+    addToReviewQueue: true
+  };
 };
 
-export const generateStage6Resources = async (section: any) => {
-  const prompt = `Resources for: "${section.title}".
-  JSON Array: [{"title": "...", "type": "video", "platform": "YouTube", "url": "...", "reason": "..."}]`;
-  return await engine.generate({ prompt, modelType: 'pro', useSearch: true, responseType: 'json' });
-};
-
-export const generateMoreQuestions = async (section: CourseSection, difficulty: number): Promise<PracticeQuestion[]> => {
-  const prompt = `MCQ for: ${section.title}. Difficulty ${difficulty}/5. JSON Array: [{question, options, correctIndex, explanation}]`;
-  const raw = await engine.generate({ prompt, responseType: 'json', modelType: 'flash' });
-  return (raw || []).map((q: any) => ({ ...q, id: crypto.randomUUID(), hasBeenAnswered: false, difficultyLevel: difficulty }));
+export const chatWithTutor = async (history: Message[], currentSection: CourseSection, userInput: string) => {
+  const prompt = `Tutoring on: ${currentSection.title}. User: "${userInput}". Be a Socratic tutor. 
+  JSON: { "text": "...", "groundingScore": number }`;
+  return await engine.generate({ prompt, history, maxTokens: 1000 });
 };
 
 export const generateStudySchedule = async (subject: string, concepts: CourseSection[]): Promise<ScheduleItem[]> => {
-  const prompt = `Study plan for: ${subject}. JSON Array: [{"title": "...", "durationMinutes": 45, "focus": "..."}]`;
-  return await engine.generate({ prompt, responseType: 'json', modelType: 'flash' });
+  const prompt = `Detailed itinerary for: ${subject}.\nJSON Array: [{title, durationMinutes, focus}]`;
+  const result = await engine.generate({ prompt, maxTokens: 800 });
+  return result || [];
 };
