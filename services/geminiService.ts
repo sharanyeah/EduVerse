@@ -21,10 +21,11 @@ class DeepTutorEngine {
 
   private getAi() {
     if (!this.ai) {
-      // Robust key retrieval for local dev (Vite) and production (Netlify)
-      const key = typeof process !== 'undefined' && process.env.API_KEY
-        ? process.env.API_KEY
-        : (import.meta as any).env?.VITE_API_KEY || process.env.API_KEY;
+      // Robust key retrieval for local dev (Vite) and production (Netlify/Node)
+      const key =
+        typeof process !== 'undefined' && process.env.API_KEY
+          ? process.env.API_KEY
+          : (import.meta as any).env?.VITE_API_KEY;
 
       if (!key) throw new Error("API_KEY_MISSING");
       this.ai = new GoogleGenAI({ apiKey: key });
@@ -54,7 +55,7 @@ class DeepTutorEngine {
   }
 
   async generate(params: any) {
-    // Explicit narrowing for TypeScript safety during build
+    // MANDATORY FIX: Explicit narrowing for TypeScript safety during build
     const prompt: string = params.prompt ?? '';
     const history: any[] = Array.isArray(params.history) ? params.history : [];
     const maxTokens: number = typeof params.maxTokens === 'number' ? params.maxTokens : 1024;
@@ -108,7 +109,7 @@ class DeepTutorEngine {
     // PRODUCTION PROXY LOGIC
     if (this.isProduction()) {
       try {
-        // Cast fetch for build compatibility
+        // Cast global fetch for build compatibility in Node environments
         const response = await (globalThis.fetch as any)('/.netlify/functions/gemini-proxy', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
