@@ -11,6 +11,9 @@ class DeepTutorEngine {
   private ai: GoogleGenAI | null = null;
 
   private isProduction() {
+    // Safely check for window to prevent crashes in Node.js environments like Netlify Functions
+    if (typeof window === 'undefined') return true; 
+    
     return window.location.hostname !== 'localhost' && 
            window.location.hostname !== '127.0.0.1' &&
            !window.location.hostname.includes('webcontainer-api.io');
@@ -57,16 +60,23 @@ class DeepTutorEngine {
 
     const promptParts: any[] = [{ text: params.prompt }];
     
-    const attachment: FileAttachment | undefined = params.attachment;
-    if (attachment && attachment.data) {
-      const mime = attachment.mimeType;
+    const attachment = params.attachment as FileAttachment | undefined;
+    if (attachment && attachment.data && typeof attachment.data === 'string') {
+      const data: string = attachment.data;
+      const mime: string = attachment.mimeType;
+      const name: string = attachment.name;
+
       if (params.isInitialScan && mime === 'application/pdf') {
-        promptParts[0].text = `Seed Document: "${attachment.name}"\nType: Academic Archive\n\n${params.prompt}`;
+        promptParts[0].text = `Seed Document: "${name}"\nType: Academic Archive\n\n${params.prompt}`;
       } else if (mime.startsWith('text/')) {
-        const decoded = atob(attachment.data);
+        // Environment-safe base64 decoding
+        const decoded = typeof atob === 'function' 
+          ? atob(data) 
+          : Buffer.from(data, 'base64').toString('utf-8');
+          
         promptParts[0].text = `[DOC_CONTEXT]\n${decoded.substring(0, 30000)}\n[/DOC_CONTEXT]\n\n${params.prompt}`;
       } else {
-        promptParts.push({ inlineData: { data: attachment.data, mimeType: mime } });
+        promptParts.push({ inlineData: { data, mimeType: mime } });
       }
     }
 
@@ -96,7 +106,6 @@ class DeepTutorEngine {
         return this.sanitizeJson(result.text);
       } catch (e) {
         console.error("Production Proxy Error, attempting direct fallback (if key exists)...", e);
-        // Fallback for edge cases where proxy fails but user has key injected
         const ai = this.getAi();
         const response = await ai.models.generateContent({ model: modelName, contents, config });
         return this.sanitizeJson(response.text);
@@ -229,7 +238,7 @@ export const chatWithTutor = async (history: Message[], currentSection: CourseSe
   return await engine.generate({ prompt, history, maxTokens: 1000 });
 };
 
-export const generateStudySchedule = async (subject: string, concepts: CourseSection[]): Promise<ScheduleItem[]> => {
+export const generateStudySchedule = async (subject: string, concepts: CourseSection[]) => {
   const prompt = `Detailed itinerary for: ${subject}.\nJSON Array: [{title, durationMinutes, focus}]`;
   const result = await engine.generate({ prompt, maxTokens: 800 });
   return result || [];
