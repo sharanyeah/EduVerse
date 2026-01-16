@@ -32,31 +32,34 @@ export const useTutorStore = create<TutorState>()(
       })),
       
       updateWorkspace: (id, updates) => set((state) => {
-        const updatedWorkspaces = state.workspaces.map(ws => {
-          if (ws.fileInfo.id === id) {
-            const merged = { ...ws, ...updates };
-            
-            // DETERMINISTIC METRICS CALCULATION
-            const totalSections = merged.sections.length;
-            const ingested = merged.sections.filter(s => !!s.content).length;
-            
-            const allFlashcards = merged.sections.flatMap(s => s.flashcards);
-            const masteredFlashcards = allFlashcards.filter(f => f.masteryStatus === 'mastered').length;
-            
-            const allQuestions = merged.sections.flatMap(s => s.practiceQuestions);
-            const answeredCorrect = allQuestions.filter(q => q.hasBeenAnswered && q.wasCorrect).length;
+        const workspaceIndex = state.workspaces.findIndex(ws => ws.fileInfo.id === id);
+        if (workspaceIndex === -1) return state;
 
-            merged.coverageStats = {
-              ingested: Math.round((ingested / (totalSections || 1)) * 100),
-              retained: Math.round((masteredFlashcards / (allFlashcards.length || 1)) * 100),
-              validated: Math.round((answeredCorrect / (allQuestions.length || 1)) * 100)
-            };
-            
-            return merged;
-          }
-          return ws;
-        });
-        return { workspaces: updatedWorkspaces };
+        const currentWorkspace = state.workspaces[workspaceIndex];
+        const mergedWorkspace = { ...currentWorkspace, ...updates };
+
+        // Surgical Update Logic: Only recalculate stats if sections changed
+        if (updates.sections) {
+          const totalSections = mergedWorkspace.sections.length;
+          const ingested = mergedWorkspace.sections.filter(s => !!s.content).length;
+          
+          const allFlashcards = mergedWorkspace.sections.flatMap(s => s.flashcards || []);
+          const masteredFlashcards = allFlashcards.filter(f => f.masteryStatus === 'mastered').length;
+          
+          const allQuestions = mergedWorkspace.sections.flatMap(s => s.practiceQuestions || []);
+          const answeredCorrect = allQuestions.filter(q => q.hasBeenAnswered && q.wasCorrect).length;
+
+          mergedWorkspace.coverageStats = {
+            ingested: Math.round((ingested / (totalSections || 1)) * 100),
+            retained: Math.round((masteredFlashcards / (allFlashcards.length || 1)) * 100),
+            validated: Math.round((answeredCorrect / (allQuestions.length || 1)) * 100)
+          };
+        }
+
+        const newWorkspaces = [...state.workspaces];
+        newWorkspaces[workspaceIndex] = mergedWorkspace;
+
+        return { workspaces: newWorkspaces };
       }),
       
       getActiveWorkspace: () => {
