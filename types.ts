@@ -4,6 +4,11 @@ export interface KeyTerm {
   definition: string;
 }
 
+export interface LexiconItem {
+  word: string;
+  meaning: string;
+}
+
 export interface Formula {
   expression: string;
   label: string;
@@ -25,6 +30,7 @@ export interface CourseSection {
   detailedSummary: string;
   content: string; 
   keyTerms: KeyTerm[];
+  lexicon: LexiconItem[];
   formulas: Formula[];
   mindmap: string; 
   sourceReference: string;
@@ -35,11 +41,8 @@ export interface CourseSection {
   practiceQuestions: PracticeQuestion[];
   resources?: LearningResource[];
   dependencies: string[];
-  // Generation States
-  isCoreLoading?: boolean;
-  isLogicLoading?: boolean;
-  isRecallLoading?: boolean;
-  isResourcesLoading?: boolean;
+  difficultyLevel?: string;
+  isSynthesized?: boolean;
 }
 
 export interface Flashcard {
@@ -61,6 +64,18 @@ export interface PracticeQuestion {
   hasBeenAnswered?: boolean;
   wasCorrect?: boolean;
   difficultyLevel: number; // 1-5
+  deepInsight?: McqReview;
+}
+
+export interface McqReview {
+  isCorrect: boolean;
+  verdict: "Correct" | "Incorrect";
+  whyUserChoiceIsCorrectOrWrong: string;
+  correctAnswerExplanation: string;
+  misconceptionDetected: string;
+  conceptsToReview: string[];
+  examTip: string;
+  addToReviewQueue: boolean;
 }
 
 export interface Concept extends CourseSection {}
