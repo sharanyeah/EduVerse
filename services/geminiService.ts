@@ -57,15 +57,16 @@ class DeepTutorEngine {
 
     const promptParts: any[] = [{ text: params.prompt }];
     
-    if (params.attachment?.data) {
-      const mime = params.attachment.mimeType;
+    const attachment: FileAttachment | undefined = params.attachment;
+    if (attachment && attachment.data) {
+      const mime = attachment.mimeType;
       if (params.isInitialScan && mime === 'application/pdf') {
-        promptParts[0].text = `Seed Document: "${params.attachment.name}"\nType: Academic Archive\n\n${params.prompt}`;
+        promptParts[0].text = `Seed Document: "${attachment.name}"\nType: Academic Archive\n\n${params.prompt}`;
       } else if (mime.startsWith('text/')) {
-        const decoded = atob(params.attachment.data);
+        const decoded = atob(attachment.data);
         promptParts[0].text = `[DOC_CONTEXT]\n${decoded.substring(0, 30000)}\n[/DOC_CONTEXT]\n\n${params.prompt}`;
       } else {
-        promptParts.push({ inlineData: { data: params.attachment.data, mimeType: mime } });
+        promptParts.push({ inlineData: { data: attachment.data, mimeType: mime } });
       }
     }
 
