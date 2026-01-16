@@ -7,13 +7,21 @@ You convert documents into structured learning workspaces using STRICT RAG.
 Retrieve ONLY from the provided context. Output strictly valid JSON. 
 Priority: Speed and structural integrity.`;
 
+interface GenerateParams {
+  prompt?: string;
+  history?: any[];
+  maxTokens?: number;
+  useSearch?: boolean;
+  isInitialScan?: boolean;
+  system?: string;
+  attachment?: FileAttachment;
+}
+
 class DeepTutorEngine {
   private ai: GoogleGenAI | null = null;
 
-  private isProduction() {
-    // SSR and Server-safe check: prevents crashes in Node.js environments
+  private isProduction(): boolean {
     if (typeof window === 'undefined') return true; 
-    
     return window.location.hostname !== 'localhost' && 
            window.location.hostname !== '127.0.0.1' &&
            !window.location.hostname.includes('webcontainer-api.io');
@@ -21,8 +29,7 @@ class DeepTutorEngine {
 
   private getAi() {
     if (!this.ai) {
-      // Robust key retrieval for local dev (Vite) and production (Netlify/Node)
-      const key = typeof process !== 'undefined' && process.env.API_KEY
+      const key = (typeof process !== 'undefined' && process.env.API_KEY)
         ? process.env.API_KEY
         : (import.meta as any).env?.VITE_API_KEY;
 
@@ -53,37 +60,35 @@ class DeepTutorEngine {
     }
   }
 
-  async generate(params: any) {
-    // MANDATORY FIX: Materialize parameters to satisfy TypeScript strict mode
-    const prompt: string = params.prompt ?? '';
+  async generate(params: GenerateParams) {
+    // MANDATORY FIX: Materialize parameters as guaranteed non-optional types
+    const prompt: string = String(params.prompt ?? '');
     const history: any[] = Array.isArray(params.history) ? params.history : [];
     const maxTokens: number = typeof params.maxTokens === 'number' ? params.maxTokens : 1024;
     const useSearch: boolean = !!params.useSearch;
     const isInitialScan: boolean = !!params.isInitialScan;
-    const system: string = params.system || DEEPTUTOR_SYSTEM_PROMPT;
+    const system: string = String(params.system || DEEPTUTOR_SYSTEM_PROMPT);
     
     const modelName = isInitialScan ? 'gemini-flash-lite-latest' : 'gemini-3-flash-preview';
     
-    // PREPARE CONTENTS
     const contents: any[] = history.map((m: any) => ({
       role: m.role === 'model' ? 'model' : 'user',
-      parts: [{ text: m.text }]
+      parts: [{ text: String(m.text ?? '') }]
     }));
 
     const promptParts: any[] = [{ text: prompt }];
     
-    const attachment = params.attachment as FileAttachment | undefined;
-    if (attachment && attachment.data && typeof attachment.data === 'string') {
-      // MANDATORY FIX: Materialize and default these values to guarantee string type for strict tsc
-      const data: string = attachment.data ?? '';
-      const mime: string = attachment.mimeType ?? 'application/octet-stream';
-      const name: string = attachment.name ?? 'Uploaded Document';
+    const attachment = params.attachment;
+    if (attachment && attachment.data) {
+      // MANDATORY FIX: Explicitly materialize and stringify attachment properties to satisfy strict tsc
+      const data: string = String(attachment.data ?? '');
+      const mime: string = String(attachment.mimeType ?? 'application/octet-stream');
+      const name: string = String(attachment.name ?? 'Uploaded Document');
 
       if (isInitialScan && mime === 'application/pdf') {
         promptParts[0].text = `Seed Document: "${name}"\nType: Academic Archive\n\n${prompt}`;
       } else if (mime.startsWith('text/')) {
-        // Safe base64 decoding for both browser and Node (Netlify Functions)
-        const decoded = typeof atob === 'function' 
+        const decoded: string = typeof atob === 'function' 
           ? atob(data) 
           : Buffer.from(data, 'base64').toString('utf-8');
           
@@ -106,10 +111,8 @@ class DeepTutorEngine {
       config.tools = [{ googleSearch: {} }];
     }
 
-    // PRODUCTION PROXY LOGIC
     if (this.isProduction()) {
       try {
-        // Cast global fetch to any to bypass Node.js typing conflicts in production
         const response = await (globalThis.fetch as any)('/.netlify/functions/gemini-proxy', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -117,18 +120,17 @@ class DeepTutorEngine {
         });
         if (!response.ok) throw new Error("PROXY_REQUEST_FAILED");
         const result = await response.json();
-        return this.sanitizeJson(result.text);
+        return this.sanitizeJson(String(result.text ?? ''));
       } catch (e) {
         console.error("Production Proxy Error, attempting direct fallback...", e);
         const ai = this.getAi();
         const response = await ai.models.generateContent({ model: modelName, contents, config });
-        return this.sanitizeJson(response.text);
+        return this.sanitizeJson(String(response.text ?? ''));
       }
     } else {
-      // DEV MODE: Direct call to Google Gemini SDK
       const ai = this.getAi();
       const response = await ai.models.generateContent({ model: modelName, contents, config });
-      return this.sanitizeJson(response.text);
+      return this.sanitizeJson(String(response.text ?? ''));
     }
   }
 }
@@ -150,7 +152,7 @@ export const getDocumentStructure = async (attachment: FileAttachment) => {
     isInitialScan: true,
     maxTokens: 800 
   });
-  return result || [];
+  return Array.isArray(result) ? result : [];
 };
 
 export const synthesizeUnitWorkspace = async (section: CourseSection, attachment: FileAttachment) => {
@@ -192,27 +194,31 @@ export const synthesizeUnitWorkspace = async (section: CourseSection, attachment
   if (!data) throw new Error("Synthesis malformed");
 
   return {
-    detailedSummary: data.detailedSummary || '',
-    content: data.content || '',
-    keyTerms: data.definitions || [],
-    lexicon: data.lexicon || [],
-    formulas: data.axioms || [],
-    mindmap: data.mindmap || '',
-    flashcards: (data.flashcards || []).slice(0, 5).map((f: any) => ({
+    detailedSummary: String(data.detailedSummary || ''),
+    content: String(data.content || ''),
+    keyTerms: Array.isArray(data.definitions) ? data.definitions : [],
+    lexicon: Array.isArray(data.lexicon) ? data.lexicon : [],
+    formulas: Array.isArray(data.axioms) ? data.axioms : [],
+    mindmap: String(data.mindmap || ''),
+    flashcards: (Array.isArray(data.flashcards) ? data.flashcards : []).slice(0, 5).map((f: any) => ({
       id: crypto.randomUUID(),
-      ...f,
+      question: String(f.question || ''),
+      answer: String(f.answer || ''),
       masteryStatus: 'learning',
       failureCount: 0,
       difficulty: 'medium'
     })),
-    practiceQuestions: (data.questions || []).slice(0, 5).map((q: any) => ({
+    practiceQuestions: (Array.isArray(data.questions) ? data.questions : []).slice(0, 5).map((q: any) => ({
       id: crypto.randomUUID(),
-      ...q,
+      question: String(q.question || ''),
+      options: Array.isArray(q.options) ? q.options.map(String) : [],
+      correctIndex: typeof q.correctIndex === 'number' ? q.correctIndex : 0,
+      explanation: String(q.explanation || ''),
       hasBeenAnswered: false,
       difficultyLevel: 3
     })),
-    difficultyLevel: data.difficulty || 'Intermediate',
-    resources: data.resources || [],
+    difficultyLevel: String(data.difficulty || 'Intermediate'),
+    resources: Array.isArray(data.resources) ? data.resources : [],
     isSynthesized: true
   };
 };
@@ -255,5 +261,5 @@ export const chatWithTutor = async (history: Message[], currentSection: CourseSe
 export const generateStudySchedule = async (subject: string, concepts: CourseSection[]): Promise<ScheduleItem[]> => {
   const prompt = `Detailed itinerary for: ${subject}.\nJSON Array: [{title, durationMinutes, focus}]`;
   const result = await engine.generate({ prompt, maxTokens: 800 });
-  return result || [];
+  return Array.isArray(result) ? result : [];
 };
