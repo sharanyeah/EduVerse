@@ -47,9 +47,20 @@ const AppContent: React.FC = () => {
   const initMutation = useMutation({
     mutationFn: async (file: FileAttachment) => {
       setErrorMessage(null);
-      setProcessingPhase('DeepTutor Stage 1: Structure Extraction...');
+      setProcessingPhase('DeepTutor: Initializing Neural Gateway...');
+      
       try {
+        // Step 1: Small Delay to ensure UI updates
+        await new Promise(r => setTimeout(r, 500));
+        
+        setProcessingPhase('DeepTutor: Parsing Document Context...');
         const skeleton = await getDocumentStructure(file);
+        
+        if (!Array.isArray(skeleton) || skeleton.length === 0) {
+          throw new Error("STRUCTURE_PROTOCOL_FAILURE: Could not extract logical units. Is the document empty?");
+        }
+
+        setProcessingPhase('DeepTutor: Architecting Curriculum...');
         const sections: CourseSection[] = skeleton.map((s: any, idx: number) => ({
           ...s,
           id: crypto.randomUUID(),
@@ -73,7 +84,7 @@ const AppContent: React.FC = () => {
           fileInfo: { 
             id: crypto.randomUUID(), 
             name: file.name, 
-            type: file.name.endsWith('.ppt') || file.name.endsWith('.pptx') ? 'ppt' : file.name.endsWith('.pdf') ? 'pdf' : 'txt',
+            type: file.name.toLowerCase().endsWith('.ppt') || file.name.toLowerCase().endsWith('.pptx') ? 'ppt' : file.name.toLowerCase().endsWith('.pdf') ? 'pdf' : 'txt',
             uploadDate: new Date().toISOString() 
           },
           subject: file.name.replace(/\.[^/.]+$/, ""),
@@ -84,8 +95,9 @@ const AppContent: React.FC = () => {
         };
         return newWs;
       } catch (err: any) {
-        setErrorMessage(handleAIError(err));
-        throw err;
+        const friendlyError = handleAIError(err);
+        setErrorMessage(friendlyError);
+        throw new Error(friendlyError);
       } finally {
         setProcessingPhase('');
       }
@@ -93,6 +105,10 @@ const AppContent: React.FC = () => {
     onSuccess: (newWs) => {
       addWorkspace(newWs);
       enrichSectionProgressive(newWs, 0);
+    },
+    onError: (err: any) => {
+      console.error("Initialization Critical Error:", err);
+      setProcessingPhase('');
     }
   });
 
@@ -112,9 +128,9 @@ const AppContent: React.FC = () => {
       updateSect({ isCoreLoading: true });
       const core = await generateStage2Core(section, ws.attachment);
       updateSect({
-        content: core.content,
-        summary: core.summary,
-        detailedSummary: core.summary, // Initially the same
+        content: core.content || '',
+        summary: core.summary || '',
+        detailedSummary: core.summary || '',
         keyTerms: (core.definitions || []).map((d: any) => ({ term: d.term, definition: d.definition })),
         formulas: (core.axioms || []).map((a: any) => ({ expression: a.expression, label: a.label })),
         isCoreLoading: false
@@ -123,7 +139,7 @@ const AppContent: React.FC = () => {
       // Stage 3: Logic
       updateSect({ isLogicLoading: true });
       const logic = await generateStage3Logic(section, ws.attachment);
-      updateSect({ mindmap: logic.mindmap, isLogicLoading: false });
+      updateSect({ mindmap: logic.mindmap || '', isLogicLoading: false });
 
       // Stage 4/5: Recall
       updateSect({ isRecallLoading: true });
@@ -156,7 +172,13 @@ const AppContent: React.FC = () => {
       });
 
     } catch (err: any) {
-      setErrorMessage(handleAIError(err));
+      console.error("Enrichment failed:", err);
+      updateSect({ 
+        isCoreLoading: false, 
+        isLogicLoading: false, 
+        isRecallLoading: false, 
+        isResourcesLoading: false 
+      });
     } finally {
       setIsEnriching(false);
     }
@@ -165,10 +187,24 @@ const AppContent: React.FC = () => {
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    
+    if (file.size > 5.5 * 1024 * 1024) {
+      setErrorMessage("File too large. Maximum size is 5.5MB for stability.");
+      return;
+    }
+
+    setErrorMessage(null);
+    setProcessingPhase('DeepTutor: Reading Local Buffer...');
+    
     const reader = new FileReader();
     reader.onload = () => {
       const base64 = (reader.result as string).split(',')[1];
       setAttachment({ data: base64, mimeType: file.type || 'application/octet-stream', name: file.name });
+      setProcessingPhase('');
+    };
+    reader.onerror = () => {
+      setErrorMessage("Local storage access failed.");
+      setProcessingPhase('');
     };
     reader.readAsDataURL(file);
   };
@@ -177,20 +213,42 @@ const AppContent: React.FC = () => {
     <div className="flex h-screen w-full bg-[#F8FAFC] overflow-hidden selection:bg-indigo-100 selection:text-indigo-900 font-sans">
       {!activeWorkspaceId ? (
         <div className="flex-1 flex flex-col items-center justify-center p-6 md:p-24 space-y-16">
-          <div className="max-w-2xl w-full text-center space-y-8">
+          <div className="max-w-2xl w-full text-center space-y-8 animate-in fade-in zoom-in duration-500">
             <h1 className="text-6xl md:text-8xl font-black tracking-tight text-slate-950 leading-[0.9]">Deep<span className="text-indigo-600">Tutor</span></h1>
-            <p className="text-slate-500 text-lg md:text-xl font-medium max-w-lg mx-auto">Production-grade academic orchestration engine.</p>
+            <p className="text-slate-500 text-lg md:text-xl font-medium max-w-lg mx-auto">Elite academic orchestration and synthesis engine.</p>
           </div>
           <div className="w-full max-w-xl space-y-6">
-            <div onClick={() => fileInputRef.current?.click()} className={`w-full aspect-video border-2 border-dashed rounded-[3rem] cursor-pointer transition-all upload-zone flex flex-col items-center justify-center gap-6 group ${attachment ? 'bg-indigo-50/30 border-indigo-400' : 'bg-white border-slate-200 hover:border-indigo-400'}`}>
+            <div onClick={() => !initMutation.isPending && fileInputRef.current?.click()} className={`w-full aspect-video border-2 border-dashed rounded-[3rem] cursor-pointer transition-all upload-zone flex flex-col items-center justify-center gap-6 group ${attachment ? 'bg-indigo-50/30 border-indigo-400' : 'bg-white border-slate-200 hover:border-indigo-400'}`}>
               <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileUpload} accept=".pdf,.txt,.ppt,.pptx" />
               <div className="w-20 h-20 rounded-3xl bg-white border border-slate-200 flex items-center justify-center text-3xl shadow-sm transition-transform group-hover:scale-105">
                 <i className={attachment ? "fas fa-file-check text-indigo-600" : "fas fa-file-arrow-up text-slate-300"} />
               </div>
               <p className="font-black uppercase tracking-widest text-xs text-slate-500">{attachment ? attachment.name : 'Ingest Study Document'}</p>
             </div>
-            {processingPhase && <div className="p-8 bg-slate-950 text-white rounded-[2.5rem] flex items-center gap-6 animate-pulse"><div className="w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div><p className="text-sm font-bold">{processingPhase}</p></div>}
-            {!processingPhase && <button disabled={!attachment || initMutation.isPending} onClick={() => attachment && initMutation.mutate(attachment)} className="w-full h-20 bg-slate-950 text-white rounded-[2rem] font-black uppercase tracking-[0.4em] text-xs shadow-2xl neo-brutalist-button disabled:opacity-10 transition-all">Initialize Workspace</button>}
+            
+            {errorMessage && (
+              <div className="p-6 bg-rose-50 border border-rose-100 text-rose-600 rounded-3xl text-sm font-bold flex items-center gap-4 animate-in slide-in-from-top-2">
+                <i className="fas fa-exclamation-circle"/>
+                {errorMessage}
+              </div>
+            )}
+
+            {processingPhase && (
+              <div className="p-8 bg-slate-950 text-white rounded-[2.5rem] flex items-center gap-6 shadow-2xl">
+                <div className="w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+                <p className="text-sm font-black uppercase tracking-widest">{processingPhase}</p>
+              </div>
+            )}
+            
+            {!processingPhase && (
+              <button 
+                disabled={!attachment || initMutation.isPending} 
+                onClick={() => attachment && initMutation.mutate(attachment)} 
+                className="w-full h-20 bg-slate-950 text-white rounded-[2rem] font-black uppercase tracking-[0.4em] text-xs shadow-2xl hover:bg-slate-900 active:scale-95 disabled:opacity-20 transition-all"
+              >
+                {initMutation.isPending ? 'Syncing Neurons...' : 'Initialize Workspace'}
+              </button>
+            )}
           </div>
         </div>
       ) : (
